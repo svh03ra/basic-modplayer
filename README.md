@@ -1,7 +1,5 @@
 # Basic .MOD Player by svh03ra
 
-#
-
 This is a very simple program designed to play .MOD Amiga module files making it easy to enjoy your favorite music!
 
 ![player](https://github.com/user-attachments/assets/9722739b-af59-42cc-a6f9-22031130920a)
