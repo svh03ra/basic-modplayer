@@ -2,12 +2,11 @@
   ===============================================
     File : mod_loader.cpp
     Author : svh03ra
-    Created : 6-Jul-2025 (‏‎10:51:38 PM)
-	// Program /* Alpha 1 /*
+    Created : 12-Jul-2025 (‏‎‏‎05:31:32 PM)
+	// Program /* Beta 1 /*
   ===============================================
-            This is an alpha version.
-      It may be unstable as it still contains
-       several limitations and some issues!
+             This is an beta version.
+         You might experience instability!
 
               Use at your own risk.
 
