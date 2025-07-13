@@ -2,12 +2,11 @@
   ===============================================
     File : mod_player_engine.cpp
     Author : svh03ra
-    Created : 6-Jul-2025 (10:46:44 PM)
-	// Program /* Alpha 1 /*
+    Created : 13-Jul-2025 (‏‎11:46:16 PM)
+	// Program /* Beta 1 /*
   ===============================================
-            This is an alpha version.
-      It may be unstable as it still contains
-       several limitations and some issues!
+             This is an beta version.
+         You might experience instability!
 
               Use at your own risk.
 
@@ -21,6 +20,12 @@
 #include <cstring>
 #include <stdexcept>
 #include <algorithm>
+#include <cstdio> // For debug()
+
+#include "api_helper.h"
+
+// Debug helper
+#define debug(fmt, ...) printf("[DEBUG]: MODEngine: " fmt "\n", ##__VA_ARGS__)
 
 // Default audio settings
 #define DEFAULT_BUFFER_SAMPLES 1024
@@ -28,7 +33,7 @@
 #define DEFAULT_SAMPLE_RATE 48000
 #define DEFAULT_OUTPUT_CHANNELS 2
 
-// Callback function for waveOut — called when a buffer finishes
+// Callback function for waveOut - called when a buffer finishes
 static void CALLBACK waveCallback(HWAVEOUT, UINT uMsg, DWORD_PTR dwInstance, DWORD_PTR, DWORD_PTR) {
     if (uMsg == WOM_DONE) {
         ModEngine* engine = reinterpret_cast<ModEngine*>(dwInstance);
@@ -38,20 +43,34 @@ static void CALLBACK waveCallback(HWAVEOUT, UINT uMsg, DWORD_PTR dwInstance, DWO
 
 // Constructor: initialize defaults and allocate buffer
 ModEngine::ModEngine() {
+	ensureConsole();
+    debug("Constructor");
     bufferSamples = DEFAULT_BUFFER_SAMPLES;
     bufferCount = DEFAULT_BUFFER_COUNT;
     sampleRate = DEFAULT_SAMPLE_RATE;
     outputChannels = DEFAULT_OUTPUT_CHANNELS;
+    isPaused = false;
     resizeMixBuffer();  // Allocate internal mix buffer
+
+    // Default init per channel
+    for (int i = 0; i < MAX_CHANNELS; ++i)
+        channels[i] = ChannelState();
+
+    // Init solo/mute state
+    std::fill(std::begin(soloChannel), std::end(soloChannel), false);
+    std::fill(std::begin(channelMuteState), std::end(channelMuteState), false);
 }
 
 // Resize mix buffer based on current settings
 void ModEngine::resizeMixBuffer() {
+    debug("Resizing mix buffer");
     mixBuffer.resize(bufferSamples * outputChannels * bufferCount);
 }
 
 // Load MOD file and initialize pattern/tempo state
 bool ModEngine::load(MODFile* file) {
+    debug("Loading MOD file");
+    if (!file || file->patternOrder.empty() || file->patterns.empty()) return false;
     mod = file;
     patternOrderPos = 0;
     currentRow = 0;
@@ -66,25 +85,137 @@ bool ModEngine::load(MODFile* file) {
 
 // Start playback: initialize buffers and submit them
 void ModEngine::start() {
+    debug("Starting playback");
     if (!mod) return;
-    setupWaveOut();  // Open wave output device
+
+    // Reset channel states cleanly
+    for (int ch = 0; ch < MAX_CHANNELS; ++ch) {
+        channels[ch] = ChannelState();  // Resets volume, freq, samplePos, etc.
+    }
+
+    resizeMixBuffer();  // Reallocate based on current bufferCount/sampleRate
+    setupWaveOut();     // Fill new headers + WAVEHDRs
+
     isPlaying = true;
+    isPaused = false;
     currentBuffer = 0;
+
     for (int i = 0; i < bufferCount; ++i)
-        submitBuffer(i);  // Pre-fill all buffers
+        submitBuffer(i);
 }
 
-// Stop playback and release audio device
+// Pause playback
+void ModEngine::pause() {
+    debug("Pausing playback");
+    isPaused = true;
+}
+
+// Resume playback
+void ModEngine::resume() {
+    if (isPaused) {
+        isPaused = false;
+        isPlaying = true;
+
+        debug("Resuming playback");
+
+        // Re-submit all buffers so audio resumes
+        for (int i = 0; i < bufferCount; ++i) {
+			debug("Submitting buffer: %d", i);
+            submitBuffer(i);
+        }
+    }
+}
+
+
+bool ModEngine::isPausedState() const {
+    return isPaused;
+}
+
+bool ModEngine::seekToRow(int row, int pattern) {
+    debug("Seek to pattern %d, row %d", pattern, row);
+    if (!mod) return false;
+
+    if (pattern >= 0 && pattern < mod->patterns.size() && row >= 0 && row < 64) {
+        currentPattern = pattern;
+        currentRow = row;
+        tickCounter = 0;
+        tickSampleCounter = 0.0f;
+
+        for (int ch = 0; ch < MAX_CHANNELS; ++ch) {
+            channels[ch].effectCmd = 0;
+            channels[ch].effectParam = 0;
+            channels[ch].vibratoPhase = 0;
+        }
+
+        return true;
+    }
+
+    return false;
+}
+
+void ModEngine::seekBackward() {
+    if (!mod) return;
+
+    int row = currentRow - 10;
+    int pat = currentPattern;
+    int pos = patternOrderPos;
+
+    if (row > 0) {
+        row--;
+    } else if (pos > 0) {
+        pos--;
+        pat = mod->patternOrder[pos];
+        row = 63;
+    }
+
+    seekToRow(row, pat);
+    patternOrderPos = pos;
+}
+
+void ModEngine::seekForward() {
+    if (!mod) return;
+
+    int row = currentRow + 10;
+    int pos = patternOrderPos;
+    int pat = currentPattern;
+
+    if (row >= 64) {
+        row = 0;
+        pos = (pos + 1) % mod->songLength;
+        pat = mod->patternOrder[pos];
+    }
+
+    seekToRow(row, pat);
+    patternOrderPos = pos;
+}
+
+void ModEngine::reset() {
+    stop();
+
+    for (WAVEHDR& hdr : headers) {
+        hdr.lpData = nullptr;
+    }
+    headers.clear();
+    mixBuffer.clear();
+
+    isPlaying = false;
+    isPaused = false;
+    mod = nullptr;
+    currentBuffer = 0;
+    tickCounter = 0;
+    tickSampleCounter = 0.0;
+}
+
 void ModEngine::stop() {
     isPlaying = false;
+    isPaused = false;
     if (hWaveOut) {
-        waveOutReset(hWaveOut);  // Stop playback
-        waveOutClose(hWaveOut);  // Close device
+        waveOutReset(hWaveOut);
+        waveOutClose(hWaveOut);
         hWaveOut = nullptr;
     }
 }
 
-// Initialize Windows waveOut API and prepare audio buffers
 void ModEngine::setupWaveOut() {
     WAVEFORMATEX fmt = {};
     fmt.wFormatTag = WAVE_FORMAT_PCM;
@@ -106,31 +237,49 @@ void ModEngine::setupWaveOut() {
     }
 }
 
-// Mix audio for a buffer and queue it to waveOut
 void ModEngine::submitBuffer(int index) {
-    if (!isPlaying) return;
+    if (!isPlaying || isPaused) return;
     mixAudio((int16_t*)&mixBuffer[index * bufferSamples * outputChannels], bufferSamples);
     waveOutWrite(hWaveOut, &headers[index], sizeof(WAVEHDR));
 }
 
-// Called by waveCallback when a buffer completes
 void ModEngine::onBufferDone() {
-    submitBuffer(currentBuffer);  // Refill buffer
+    submitBuffer(currentBuffer);
     currentBuffer = (currentBuffer + 1) % bufferCount;
 }
 
-// Convert MOD period value to actual frequency
-float ModEngine::periodToFreq(uint16_t period) {
-    if (period == 0) return 0;
-    return 7093789.2f / period;
+float ModEngine::periodToFreq(uint16_t period, int finetune) {
+    if (period == 0) return 0.0f;
+
+    static const float periodTable[16] = {
+        8363.0f, 8413.0f, 8463.0f, 8529.0f,
+        8581.0f, 8651.0f, 8723.0f, 8757.0f,
+        7895.0f, 7941.0f, 7985.0f, 8046.0f,
+        8107.0f, 8169.0f, 8232.0f, 8280.0f
+    };
+
+    float baseFreq = periodTable[finetune & 0x0F];
+    return (baseFreq * 428.0f) / period;
 }
 
-// Advance tick state; handles row changes and per-tick effects
+void ModEngine::MuteChannel(int channel, bool mute) {
+    if (channel >= 0 && channel < MAX_CHANNELS) {
+        channelMuteState[channel] = mute;
+    }
+}
+
+// New function: set solo state of a channel
+void ModEngine::setChannelSolo(int ch, bool state) {
+    if (ch >= 0 && ch < MAX_CHANNELS) {
+        soloChannel[ch] = state;
+    }
+}
+
 void ModEngine::tick() {
     if (tickCounter == 0)
-        handleRow();  // New row: decode notes
+        handleRow();
     else
-        processTickEffects();  // Mid-row: effects like vibrato
+        processTickEffects();
 
     tickCounter++;
     if (tickCounter >= speed) {
@@ -144,35 +293,51 @@ void ModEngine::tick() {
     }
 }
 
-// Decode and apply note/sample data for current row
 void ModEngine::handleRow() {
     MODPattern& pat = mod->patterns[currentPattern];
     for (int ch = 0; ch < MAX_CHANNELS; ++ch) {
         MODNote& note = pat.notes[currentRow][ch];
-        if (note.period > 0) {
-            int sampleId = note.sampleNumber;
-            if (sampleId >= 0 && sampleId < mod->samples.size()) {
+        ChannelState& c = channels[ch];
+
+        // Store effect for tick processing
+        c.effectCmd = note.effectType;
+        c.effectParam = note.effectParam;
+
+        bool hasNewNote = note.period > 0;
+        bool hasNewSample = note.sampleNumber > 0;
+
+        // Get sample index (if provided)
+        int sampleId = note.sampleNumber - 1;  // NOTE: Always subtract 1 to prevent playback failure from invalid sample indices
+        if (sampleId >= 0 && sampleId < mod->samples.size()) {
+            if (hasNewSample) {
+                c.sampleIndex = sampleId;
                 MODSample& s = mod->samples[sampleId];
-                ChannelState& c = channels[ch];
                 c.sampleData = s.data.data();
                 c.sampleLength = s.length;
                 c.loopStart = s.loopStart;
                 c.loopLength = s.loopLength;
-                c.sampleIndex = sampleId;
-                c.samplePos = 0.0f;
-                c.playing = true;
                 c.volume = s.volume / 64.0f;
-                c.freq = periodToFreq(note.period);
-                c.currentPeriod = note.period;
-                c.targetPeriod = note.period;
+                c.finetune = s.finetune;
             }
         }
 
-        // Store effects for processing on later ticks
-        channels[ch].effectCmd = note.effectType;
-        channels[ch].effectParam = note.effectParam;
+        // If there's a new note
+        if (hasNewNote) {
+            // Tone portamento (3xx) means don't retrigger sample
+            if (note.effectType == 0x03) {
+                c.targetPeriod = note.period;
+                // Don't reset samplePos or restart
+            } else {
+                // Normal note trigger
+                c.samplePos = 0.0f;
+                c.playing = true;
+                c.currentPeriod = note.period;
+                c.targetPeriod = note.period;
+                c.freq = periodToFreq(note.period, c.finetune);  // With finetune
+            }
+        }
 
-        // Handle tempo/speed change (0x0F)
+        // Handle Fxx: Speed / Tempo
         if (note.effectType == 0x0F) {
             if (note.effectParam <= 0x1F && note.effectParam > 0) {
                 speed = note.effectParam;
@@ -184,83 +349,188 @@ void ModEngine::handleRow() {
     }
 }
 
-// Apply effects (arpeggio, portamento, vibrato, volume) on current tick
+// TODO: Reference for info - https://wiki.openmpt.org/Manual:_Effect_Reference#Effect_Column
 void ModEngine::processTickEffects() {
     for (int ch = 0; ch < MAX_CHANNELS; ++ch) {
         ChannelState& c = channels[ch];
         switch (c.effectCmd) {
-            case 0x0: {  // Arpeggio
+            case 0x0: { // 0xy: Arpeggio
                 int n = tickCounter % 3;
                 int semitone = 0;
                 if (n == 1) semitone = (c.effectParam >> 4);
                 else if (n == 2) semitone = (c.effectParam & 0x0F);
                 float newPeriod = c.currentPeriod * std::pow(2.0f, -semitone / 12.0f);
-                c.freq = periodToFreq((uint16_t)newPeriod);
+                c.freq = periodToFreq((uint16_t)newPeriod, c.finetune);
                 break;
             }
-            case 0x3: {  // Portamento
+            case 0x1: { // 1xx: Portamento Up
+                c.currentPeriod = std::max(113.0f, c.currentPeriod - c.effectParam);
+                c.freq = periodToFreq((uint16_t)c.currentPeriod, c.finetune);
+                break;
+            }
+            case 0x2: { // 2xx: Portamento Down
+                c.currentPeriod = std::min(856.0f, c.currentPeriod + c.effectParam);
+                c.freq = periodToFreq((uint16_t)c.currentPeriod, c.finetune);
+                break;
+            }
+            case 0x3: { // 3xx: Tone Portamento
                 int slide = c.effectParam;
                 if (c.currentPeriod > c.targetPeriod)
-                    c.currentPeriod -= slide;
+                    c.currentPeriod = std::max(c.currentPeriod - slide, (float)c.targetPeriod);
                 else if (c.currentPeriod < c.targetPeriod)
-                    c.currentPeriod += slide;
-                c.freq = periodToFreq((uint16_t)c.currentPeriod);
+                    c.currentPeriod = std::min(c.currentPeriod + slide, (float)c.targetPeriod);
+                c.freq = periodToFreq((uint16_t)c.currentPeriod, c.finetune);
                 break;
             }
-            case 0x4: {  // Vibrato
+            case 0x4: { // 4xy: Vibrato
                 float depth = (c.effectParam & 0x0F) * 2;
                 float rate = (c.effectParam >> 4) * 0.2f;
                 float vib = std::sin(c.vibratoPhase) * depth;
-                c.freq = periodToFreq((uint16_t)(c.currentPeriod + vib));
+                c.freq = periodToFreq((uint16_t)(c.currentPeriod + vib), c.finetune);
                 c.vibratoPhase += rate;
                 break;
             }
-            case 0xC: {  // Volume set
+            case 0xC: { // Cxx: Set Volume
                 c.volume = (c.effectParam & 0x3F) / 64.0f;
+                break;
+            }
+			case 0xD: { // Dxx: Pattern Break
+				// Convert BCD to row number (D34 -> row 34)
+				int nextRow = ((c.effectParam >> 4) * 10) + (c.effectParam & 0x0F);
+
+				// Move to next pattern in order list
+				patternOrderPos = (patternOrderPos + 1) % mod->songLength;
+				currentPattern = mod->patternOrder[patternOrderPos];
+
+				// Set target row for next tick
+				currentRow = nextRow;
+
+				// Force advance on next tick
+				tickCounter = speed;
+
+				break;
+			}
+            case 0xE: { // ECx: Note Cut
+                uint8_t subCmd = (c.effectParam >> 4);
+                uint8_t subVal = (c.effectParam & 0x0F);
+                if (subCmd == 0xC && tickCounter == subVal) {
+                    c.volume = 0;
+                }
+                break;
+            }
+            case 0xF: { // Fxx: Set Speed/Tempo
+                if (tickCounter == 0 && c.effectParam > 0) {
+                    if (c.effectParam <= 0x1F) {
+                        speed = c.effectParam;
+                    } else {
+                        tempo = c.effectParam;
+                        tickSamples = (sampleRate * 2.5f) / tempo;
+                    }
+                }
                 break;
             }
         }
     }
+		//debug("Playing pattern %d, row %d", currentPattern, currentRow);
 }
 
-// Audio mixing function — fills buffer with mixed output of all channels
+// Audio mixing function - fills buffer with mixed output of all channels
 void ModEngine::mixAudio(int16_t* buffer, int samples) {
+    // Clear output buffer
     std::memset(buffer, 0, samples * outputChannels * sizeof(int16_t));
-    for (int i = 0; i < samples; ++i) {
-        tickSampleCounter += 1.0f;
-        if (tickSampleCounter >= tickSamples) {
-            tickSampleCounter -= tickSamples;
-            tick();  // Advance tick (and possibly row)
+
+    // Pause handling output silence and skip processing
+    if (isPaused) {
+        for (int i = 0; i < samples; ++i) {
+            tickSampleCounter += 1.0f;
+            if (tickSampleCounter >= tickSamples) {
+                tickSampleCounter -= tickSamples;
+                // Do NOT call tick(); just keep time sync
+            }
         }
+        return;
+    }
+
+    // Check if any solo is active
+    bool anySolo = std::any_of(std::begin(soloChannel), std::end(soloChannel), [](bool s) { return s; });
+
+    for (int i = 0; i < samples; ++i) {
+        // Advance tick if needed
+        while (tickSampleCounter >= tickSamples) {
+            tickSampleCounter -= tickSamples;
+            tick();
+        }
+        tickSampleCounter += 1.0f;
 
         for (int ch = 0; ch < MAX_CHANNELS; ++ch) {
+            // Skip muted or non-soloed channels
+            if (channelMuteState[ch]) continue;
+            if (anySolo && !soloChannel[ch]) continue;
+
             ChannelState& c = channels[ch];
             if (!c.playing || !c.sampleData) continue;
 
             float effectiveFreq = c.freq;
 
-            // Inline re-evaluation of arpeggio/vibrato during mixing
+            // Handle per-tick effect commands
             switch (c.effectCmd) {
-                case 0x0: {
+                case 0x0: { // Arpeggio: alternate between base, +semitone1, +semitone2
                     int n = tickCounter % 3;
                     int semitone = (n == 1) ? (c.effectParam >> 4) :
                                    (n == 2) ? (c.effectParam & 0x0F) : 0;
                     float newPeriod = c.currentPeriod * std::pow(2.0f, -semitone / 12.0f);
-                    effectiveFreq = periodToFreq((uint16_t)newPeriod);
+                    effectiveFreq = periodToFreq((uint16_t)newPeriod, c.finetune);
                     break;
                 }
-                case 0x4: {
+                case 0x1: { // Portamento Up
+                    c.currentPeriod = std::max(113.0f, c.currentPeriod - c.effectParam);
+                    effectiveFreq = periodToFreq((uint16_t)c.currentPeriod, c.finetune);
+                    break;
+                }
+                case 0x2: { // Portamento Down
+                    c.currentPeriod = std::min(856.0f, c.currentPeriod + c.effectParam);
+                    effectiveFreq = periodToFreq((uint16_t)c.currentPeriod, c.finetune);
+                    break;
+                }
+                case 0x3: { // Tone Portamento toward targetPeriod
+                    int slide = c.effectParam;
+                    if (c.currentPeriod > c.targetPeriod)
+                        c.currentPeriod = std::max(c.currentPeriod - slide, (float)c.targetPeriod);
+                    else if (c.currentPeriod < c.targetPeriod)
+                        c.currentPeriod = std::min(c.currentPeriod + slide, (float)c.targetPeriod);
+                    effectiveFreq = periodToFreq((uint16_t)c.currentPeriod, c.finetune);
+                    break;
+                }
+                case 0x4: { // Vibrato: LFO modulates pitch
                     float depth = (c.effectParam & 0x0F) * 2;
                     float rate = (c.effectParam >> 4) * 0.2f;
                     float vib = std::sin(c.vibratoPhase) * depth;
-                    effectiveFreq = periodToFreq((uint16_t)(c.currentPeriod + vib));
+                    effectiveFreq = periodToFreq((uint16_t)(c.currentPeriod + vib), c.finetune);
                     c.vibratoPhase += rate;
                     break;
                 }
+                case 0xC: { // Set Volume
+                    c.volume = (c.effectParam & 0x3F) / 64.0f;
+                    break;
+                }
+                case 0xE: { // ECx: Note Cut after N ticks
+                    uint8_t subCmd = (c.effectParam >> 4);
+                    uint8_t subVal = (c.effectParam & 0x0F);
+                    if (subCmd == 0xC && tickCounter == subVal) {
+                        c.volume = 0;
+                    }
+                    break;
+                }
+                case 0xF: { // Fxx: Speed/Tempo handled in tick(), (unused!)
+                    break;
+                }
+                default:
+                    break;
             }
 
+            // Sample position and looping
             int idx = static_cast<int>(c.samplePos);
-            if (idx >= c.sampleLength) {
+            if (idx < 0 || idx >= c.sampleLength) {
                 if (c.loopLength > 2) {
                     c.samplePos = static_cast<float>(c.loopStart);
                     idx = c.loopStart;
@@ -270,17 +540,19 @@ void ModEngine::mixAudio(int16_t* buffer, int samples) {
                 }
             }
 
-            int8_t s = c.sampleData[idx];  // 8-bit PCM sample
-            int16_t val = static_cast<int16_t>(s * c.volume * 512);  // Convert to 16-bit PCM
+            // Fetch and scale sample value
+            int8_t s = c.sampleData[idx];
+            constexpr float mixVolume = 0.125f; // Global gain scaler
+            int16_t val = static_cast<int16_t>(s * c.volume * 512 * mixVolume);
 
-            // Mix into output buffer (mono or stereo)
+            // Mix to output buffer (mono/stereo)
             for (int chn = 0; chn < outputChannels; ++chn) {
                 int mixIdx = i * outputChannels + chn;
                 int mixed = buffer[mixIdx] + val;
-                buffer[mixIdx] = std::min(std::max(mixed, -32768), 32767);  // Clipping
+                buffer[mixIdx] = std::clamp(mixed, -32768, 32767);
             }
 
-            // Advance sample position
+            // Advance sample position based on frequency
             c.samplePos += effectiveFreq / sampleRate;
         }
     }
