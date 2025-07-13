@@ -2,12 +2,11 @@
   ===============================================
     File : mod_player_engine.h
     Author : svh03ra
-    Created : 6-Jul-2025 (‏‎10:48:53 PM)
-	// Program /* Alpha 1 /*
+    Created : 13-Jul-2025 (‏‎‏‎11:46:24 PM)
+	// Program /* Beta 1 /*
   ===============================================
-            This is an alpha version.
-      It may be unstable as it still contains
-       several limitations and some issues!
+             This is an beta version.
+         You might experience instability!
 
               Use at your own risk.
 
@@ -46,6 +45,7 @@ struct ChannelState {
     float targetPeriod = 0.0f;      // Target period for portamento
     float currentPeriod = 0.0f;     // Current period value
     float vibratoPhase = 0.0f;      // Phase accumulator for vibrato LFO
+	int finetune = 0;
 };
 
 // Main MOD playback engine
@@ -56,10 +56,18 @@ public:
     // Load MOD file and control playback
     bool load(MODFile* file);       // Load parsed MOD structure
     void start();                   // Begin playback
+    void reset();                   // comment placeholder
     void stop();                    // Stop playback and release audio
+    void pause();                   // Pause playback
+    void resume();                  // Resume playback
+    bool isPausedState() const;     // Return paused status
+    bool seekToRow(int row, int pattern); // Jump to position
+	void seekBackward();  			// Jump one row back
+	void seekForward();  	    // Jump one row forward
     void tick();                    // Process one MOD tick
     void onBufferDone();            // Called when audio buffer finishes
     void mixAudio(int16_t* buffer, int samples); // Mix samples into output buffer
+	void MuteChannel(int channel, bool mute);
 
     // Runtime audio configuration
     void setBufferSize(int size);   // Set samples per buffer (64 - 8192)
@@ -84,6 +92,23 @@ public:
     // Array of channel states
     ChannelState channels[MAX_CHANNELS];
 
+    // Solo toggle array
+    void setChannelSolo(int ch, bool state);    // Toggle solo state per channel
+	
+	bool isChannelMuted(int ch) const {
+        return ch >= 0 && ch < MAX_CHANNELS ? channelMuteState[ch] : true;
+    }
+
+    bool isChannelSoloed(int ch) const {
+        return ch >= 0 && ch < MAX_CHANNELS ? soloChannel[ch] : false;
+    }
+
+    bool anyChannelSoloed() const {
+        for (int i = 0; i < MAX_CHANNELS; ++i)
+            if (soloChannel[i]) return true;
+        return false;
+    }
+
 private:
     // MOD file data (loaded externally)
     MODFile* mod         = nullptr;
@@ -102,6 +127,7 @@ private:
     std::vector<int16_t> mixBuffer; // Output buffer (interleaved)
     std::vector<WAVEHDR> headers;   // WaveOut headers for buffers
     std::atomic<bool> isPlaying = false;
+    std::atomic<bool> isPaused = false;
 
     // Tick timing control
     double tickSamples        = 0.0; // Samples per tick (recomputed with tempo)
@@ -111,7 +137,11 @@ private:
     void setupWaveOut();            // Initialize WaveOut and buffers
     void resizeMixBuffer();         // Resize mix buffer when settings change
     void submitBuffer(int index);   // Send buffer to WaveOut
-    float periodToFreq(uint16_t period); // Convert MOD period to Hz
+    float periodToFreq(uint16_t period, int finetune); // Convert MOD period to Hz
     void processTickEffects();      // Apply per-tick effects
     void handleRow();               // Decode note data on new row
+
+    // Mute and solo state
+    bool channelMuteState[MAX_CHANNELS] = { false };
+    bool soloChannel[MAX_CHANNELS] = { false };
 };
