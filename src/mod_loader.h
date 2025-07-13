@@ -2,12 +2,11 @@
   ===============================================
     File : mod_loader.h
     Author : svh03ra
-    Created : 6-Jul-2025 (‏‎10:58:11 PM)
-	// Program /* Alpha 1 /*
+    Created : 13-Jul-2025 (‏‎‏‎06:41:31 PM)
+	// Program /* Beta 1 /*
   ===============================================
-            This is an alpha version.
-      It may be unstable as it still contains
-       several limitations and some issues!
+             This is an beta version.
+         You might experience instability!
 
               Use at your own risk.
 
@@ -26,6 +25,7 @@
 struct MODSample {
     std::string name;         // Sample name (22 bytes in MOD)
     uint16_t length = 0;      // Sample length in bytes (stored as words × 2)
+    int8_t finetune = 0;      // Finetune: -8 to +7 (from 4-bit unsigned nibble)
     uint8_t volume = 64;      // Volume (0–64)
     uint16_t loopStart = 0;   // Loop start position (bytes)
     uint16_t loopLength = 0;  // Loop length (bytes)
